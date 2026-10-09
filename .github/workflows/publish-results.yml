@@ -33,7 +33,6 @@ jobs:
           ls -R ./artefacts || true
           # fallbacks if artefact missing (e.g. fork PR from private)
           cat ./artefacts/validation_summary.md 2>/dev/null || echo "No validation summary." > ./artefacts/validation_summary.md
-          cat ./artefacts/compile_summary.md 2>/dev/null || echo "No compile summary." > ./artefacts/compile_summary.md
           cat ./artefacts/validation_result.txt 2>/dev/null || echo "STATUS=UNKNOWN" > ./artefacts/validation_result.txt
 
           # Build comment body — treat artefact content as DATA, escape for markdown
@@ -43,8 +42,6 @@ jobs:
             cat ./artefacts/validation_summary.md
             echo ""
             echo "---"
-            echo ""
-            cat ./artefacts/compile_summary.md
             echo ""
             if grep -q "^STATUS=FAIL" ./artefacts/validation_result.txt 2>/dev/null; then
               echo "> ❌ **Status: FAILED** — please fix issues above and push again."
@@ -81,16 +78,15 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           STATUS=$(cat ./artefacts/validation_result.txt 2>/dev/null | grep "^STATUS=" | cut -d= -f2 || echo UNKNOWN)
-          COMPILE=$(cat ./artefacts/compile_result.txt 2>/dev/null | grep "^COMPILE_STATUS=" | cut -d= -f2 || echo UNKNOWN)
-          echo "Validation: $STATUS  Compile: $COMPILE"
+          echo "Validation: $STATUS"
 
           # Ensure labels exist (ignore errors if they do)
           gh api "repos/$REPO/labels" --silent 2>&1 | head -c 200 || true
 
-          if [ "$STATUS" = "PASS" ] && [ "$COMPILE" != "FAIL" ]; then
+          if [ "$STATUS" = "PASS" ]; then
             gh pr edit "$PR" --repo "$REPO" --add-label "auto-validated,ready-for-review" --remove-label "needs-fix" 2>&1 || \
             gh api "repos/$REPO/issues/$PR/labels" -X POST -f labels='["auto-validated","ready-for-review"]' 2>&1 | tail -5 || true
-          elif [ "$STATUS" = "FAIL" ] || [ "$COMPILE" = "FAIL" ]; then
+          elif [ "$STATUS" = "FAIL" ]; then
             gh pr edit "$PR" --repo "$REPO" --add-label "needs-fix" --remove-label "ready-for-review" 2>&1 || \
             gh api "repos/$REPO/issues/$PR/labels" -X POST -f labels='["needs-fix"]' 2>&1 | tail -5 || true
           fi

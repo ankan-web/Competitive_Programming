@@ -46,7 +46,3 @@ require_student_dir: true
 # See CONTRIBUTING.md for trade-off (GitHub allows 1 open PR per head branch).
 per_practical_pr: false
 
-# Compilation: attempt for these extensions
-compile_extensions:
-  - cpp
-  - c

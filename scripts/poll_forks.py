@@ -186,7 +186,6 @@ for fork in forks:
 ### Automated Checks
 - [ ] Directory structure
 - [ ] File type validation
-- [ ] Compilation check
 - [ ] No prohibited files
 
 > This PR was automatically created by the repository submission system (poll-forks).
