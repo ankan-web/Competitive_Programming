@@ -8,6 +8,7 @@ on:
 permissions:
   contents: read
   pull-requests: write
+  actions: write
 
 concurrency:
   group: poll-forks
@@ -15,11 +16,14 @@ concurrency:
 
 jobs:
   poll:
+    if: github.repository == 'ankan-web/Competitive_Programming'
     runs-on: ubuntu-latest
     # Runs in UPSTREAM with GITHUB_TOKEN — never executes fork code
     permissions:
       contents: read
       pull-requests: write
+      actions: write
+      issues: write
     steps:
       - name: Checkout upstream main
         uses: actions/checkout@v4
@@ -37,10 +41,7 @@ jobs:
 
       - name: Poll forks and create/update PRs
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # To use a PAT for higher rate limit, set repository secret FORK_SYNC_PAT
-          # and uncomment below:
-          # GH_TOKEN: ${{ secrets.FORK_SYNC_PAT || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.FORK_SYNC_PAT || secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           BASE_BRANCH: main
         run: |

@@ -66,12 +66,14 @@ jobs:
 
       - name: Determine submission metadata
         id: meta
+        env:
+          BRANCH: ${{ github.ref_name }}
+          ACTOR: ${{ github.actor }}
+          UPSTREAM: ${{ steps.upstream.outputs.upstream }}
         run: |
-          BRANCH="${{ github.ref_name }}"
-          ACTOR="${{ github.actor }}"
           # Detect practicals changed vs upstream main (if available) else vs previous commit
-          git fetch origin main --depth=50 2>&1 | tail -3 || true
-          BASE_SHA=$(git rev-parse origin/main 2>/dev/null || git rev-parse HEAD~1 2>/dev/null || echo HEAD)
+          git fetch "https://github.com/$UPSTREAM.git" main:refs/remotes/upstream/main
+          BASE_SHA=$(git rev-parse refs/remotes/upstream/main)
           CHANGED=$(git diff --name-only "$BASE_SHA"...HEAD 2>/dev/null | head -n 100 || git diff --name-only HEAD~1 2>/dev/null | head -n 100 || echo "")
           echo "Changed files:"
           echo "$CHANGED"
@@ -90,7 +92,7 @@ jobs:
           fi
 
           # Build file list for body
-          FILE_LIST=$(echo "$CHANGED" | grep -E "Practical-[0-9]+/" | sed 's/^/- /' | head -n 50)
+          FILE_LIST=$(echo "$CHANGED" | grep -E "Practical-[0-9]+/" | sed 's/^/- /' | head -n 50 || true)
           [ -z "$FILE_LIST" ] && FILE_LIST="- (no Practical-* files detected — check folder structure)"
 
           echo "title=$TITLE" >> "$GITHUB_OUTPUT"
@@ -127,7 +129,7 @@ jobs:
           file_list = os.environ.get("FILE_LIST","")  # from meta step — passed via env file?
           # file_list is in step output, not env — rebuild from git diff
           try:
-              changed = subprocess.check_output(["git","diff","--name-only", "origin/main...HEAD"], text=True)
+              changed = subprocess.check_output(["git","diff","--name-only", "refs/remotes/upstream/main...HEAD"], text=True)
           except:
               try:
                   changed = subprocess.check_output(["git","diff","--name-only", "HEAD~1"], text=True)
@@ -213,7 +215,7 @@ jobs:
               print(f"POST status {s}: {json.dumps(j, indent=2)[:2000]}")
               if s not in (200,201):
                   msg = j.get("message","") + " " + str(j.get("errors",""))
-                  if "pull request already exists" in msg.lower() or s == 422:
+                  if "pull request already exists" in msg.lower() :
                       print("PR already exists (race with poller) — ignoring.")
                   else:
                       # Helpful hint if Actions are disabled or token lacks permission

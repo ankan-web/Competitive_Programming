@@ -5,6 +5,47 @@
 
 ---
 
+## Automation repair notes
+
+The upstream poller explicitly dispatches `Validate Submission` for new and existing
+submission PRs. This handles GitHub's approval-gated runs for token-created PRs.
+Validation reads Git objects with the upstream's trusted script and configuration;
+student scripts are never executed. The publisher independently revalidates the
+current head, posts the `validate` commit status, and merges only an open, non-draft,
+conflict-free PR that passes validation and GitHub's branch protections.
+
+Owner setup for this version:
+
+1. Merge these automation changes into `main` using a maintainer account. Student
+   submission validation intentionally rejects changes to the automation itself.
+2. Enable **Allow GitHub Actions to create and approve pull requests** in Actions
+   settings. Allow merge commits in repository settings; this preserves ancestry
+   when students reuse their fork branch for later submissions.
+3. Keep `validate` as the required status. The validation job is now named
+   `submission-rules`; the publisher posts `validate` on the actual PR head even
+   when validation was dispatched from `main`.
+4. Run **Poll Forks & Create PRs** manually once to retry existing submissions.
+5. If a separate approving review is required, a PR created by `github-actions[bot]`
+   cannot be approved by that same bot. Supply `FORK_SYNC_PAT` from a separate PR
+   creator identity, with repository Contents read, Pull requests write, Actions
+   write and Issues write permissions, or provide the required human review.
+   The code never bypasses branch protection.
+
+The enforced rules are in `submission-config.yml`: practical range, folder shape,
+extensions, prohibited patterns, protected paths, and file/total size limits.
+Deletions and renames are checked too, and symlinks are rejected. **Compilation is
+not implemented** (the older guide below incorrectly described a nonexistent
+`compile_check.py`). This repair does not claim to compile or execute submissions.
+Likewise, `per_practical_pr: true` is not implemented by the existing poller.
+Fork-side instant creation remains best-effort because a fork's default token
+may not have permission to create an upstream PR; upstream polling is the supported
+fallback. Scheduled runs may be delayed by GitHub.
+
+Local regression checks: `python -m pip install PyYAML` then
+`python -m unittest discover -s tests -v`.
+
+---
+
 ## Table of Contents
 1. [For Students — Submit Your Code](#1-for-students--submit-your-code)
    - 1.1 Prerequisites
