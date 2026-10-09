@@ -8,6 +8,7 @@ Only calls GitHub REST API to create PR resources in upstream.
 Idempotency: One open PR per head = forkOwner:branch. Subsequent pushes update PR body.
 """
 import os, sys, json, urllib.request, urllib.error, time, re, subprocess
+from urllib.parse import quote, urlencode
 
 REPO = os.environ.get("REPO") or os.environ.get("GITHUB_REPOSITORY") or "ankan-web/Competitive_Programming"
 BASE_BRANCH = os.environ.get("BASE_BRANCH", "main")
@@ -62,8 +63,7 @@ def paginated_get(path):
         p = f"{path}{sep}per_page=100&page={page}"
         status, data, hdrs = gh_api("GET", p)
         if status != 200:
-            print(f"GET {p} failed {status}: {data}")
-            break
+            raise RuntimeError(f"GET {p} failed {status}: {data}")
         if not isinstance(data, list):
             print(f"Unexpected response for {p}: {data}")
             break
@@ -132,7 +132,7 @@ for fork in forks:
         print(f"  -> Checking {head_ref}")
 
         # Compare ahead
-        status, cmp, _ = gh_api("GET", f"/repos/{REPO}/compare/{BASE_BRANCH}...{head_ref}")
+        status, cmp, _ = gh_api("GET", f"/repos/{REPO}/compare/{quote(BASE_BRANCH, safe='')}...{quote(head_ref, safe='')}")
         if status==404:
             # branch not found or no common history
             print(f"     Compare 404: branch may not exist or diverged")
@@ -154,7 +154,7 @@ for fork in forks:
             continue
 
         # Check if open PR already exists for this head
-        status2, prs, _ = gh_api("GET", f"/repos/{REPO}/pulls?state=open&head={head_ref}&per_page=10")
+        status2, prs, _ = gh_api("GET", f"/repos/{REPO}/pulls?" + urlencode({"state": "open", "head": head_ref, "per_page": 10}))
         if status2!=200:
             print(f"     List PRs failed {status2}: {prs}")
             prs=[]
@@ -221,9 +221,19 @@ for fork in forks:
                     pass
             else:
                 msg=str(j.get("message","")) + " " + str(j.get("errors",""))
-                if "pull request already exists" in msg.lower() or s==422:
+                if "pull request already exists" in msg.lower():
                     print("     PR already exists (race) — ignoring")
                 else:
-                    print(f"     Failed to create PR: {j}")
+                    raise RuntimeError(f"Failed to create PR ({s}): {j}")
+
+        # Token-created PR runs can require manual approval. Explicit dispatch
+        # is supported with GITHUB_TOKEN, and also retries existing open submissions.
+        number = existing["number"] if existing else (j.get("number") if s in (200, 201) else None)
+        if number:
+            ds, result, _ = gh_api("POST", f"/repos/{REPO}/actions/workflows/validate-pr.yml/dispatches",
+                                  {"ref": BASE_BRANCH, "inputs": {"pr_number": str(number)}})
+            if ds != 204:
+                raise RuntimeError(f"Validation dispatch failed ({ds}): {result}")
+            print(f"     Dispatched validation for PR #{number}")
 
 print("\nPoll complete.")

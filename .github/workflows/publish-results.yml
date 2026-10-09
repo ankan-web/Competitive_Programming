@@ -2,126 +2,139 @@ name: Publish Validation Results
 
 on:
   workflow_run:
-    workflows: ["Validate Submission"]
+    workflows: ['Validate Submission']
     types: [completed]
-    branches: [main]
 
 permissions:
-  contents: read
+  actions: read
+  contents: write
+  statuses: write
   pull-requests: write
   issues: write
+
+concurrency:
+  group: publish-validation
+  cancel-in-progress: false
 
 jobs:
   publish:
     runs-on: ubuntu-latest
-    # This workflow runs from BASE branch (trusted) — safe to use GITHUB_TOKEN with write
-    # It never checks out or executes PR head code; it only reads artefact data as text.
-    permissions:
-      contents: write
-      pull-requests: write
-      issues: write
-    if: ${{ github.event.workflow_run.conclusion != 'skipped' }}
+    if: ${{ contains(fromJSON('["success", "failure"]'), github.event.workflow_run.conclusion) }}
     steps:
-      - name: Download validation artefacts
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
-          name: validation-results-${{ github.event.workflow_run.pull_requests[0].number }}
-          path: ./artefacts
+          name: validation-results
+          path: results
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Read results
-        id: read
-        run: |
-          echo "PR_NUMBER=${{ github.event.workflow_run.pull_requests[0].number }}"
-          ls -R ./artefacts || true
-          # fallbacks if artefact missing (e.g. fork PR from private)
-          cat ./artefacts/validation_summary.md 2>/dev/null || echo "No validation summary." > ./artefacts/validation_summary.md
-          cat ./artefacts/validation_result.txt 2>/dev/null || echo "STATUS=UNKNOWN" > ./artefacts/validation_result.txt
-
-          # Build comment body — treat artefact content as DATA, escape for markdown
-          {
-            echo "## Automated Validation Results"
-            echo ""
-            cat ./artefacts/validation_summary.md
-            echo ""
-            echo "---"
-            echo ""
-            if grep -q "^STATUS=FAIL" ./artefacts/validation_result.txt 2>/dev/null; then
-              echo "> ❌ **Status: FAILED** — please fix issues above and push again."
-            elif grep -q "^STATUS=PASS" ./artefacts/validation_result.txt 2>/dev/null; then
-              echo "> ✅ **Status: PASSED** — ready for review."
-            else
-              echo "> ⚠️ Status: UNKNOWN"
-            fi
-            echo ""
-            echo "_Results from workflow run [#${{ github.event.workflow_run.id }}](${{ github.event.workflow_run.html_url }})_"
-          } > comment_body.md
-          cat comment_body.md
-
-      - name: Find existing bot comment
-        id: find
-        uses: peter-evans/find-comment@v3
+      - name: Resolve and check validated revision
+        id: pr
+        uses: actions/github-script@v7
         with:
-          issue-number: ${{ github.event.workflow_run.pull_requests[0].number }}
-          comment-author: "github-actions[bot]"
-          body-includes: "Automated Validation Results"
+          script: |
+            const fs = require('fs');
+            const meta = JSON.parse(fs.readFileSync('results/validation_metadata.json', 'utf8'));
+            const run = context.payload.workflow_run;
+            if (!Number.isSafeInteger(meta.number) || !/^[a-f0-9]{40}$/.test(meta.head) || !/^[a-f0-9]{40}$/.test(meta.base)) {
+              throw new Error('Invalid validation metadata');
+            }
+            if (!['pull_request', 'workflow_dispatch'].includes(run.event)) throw new Error('Unexpected run event');
+            if (run.event === 'pull_request' && run.head_sha !== meta.head) throw new Error('Run/head mismatch');
+            if (run.event === 'workflow_dispatch' && run.head_branch !== 'main') throw new Error('Dispatch must run trusted main');
+            const {data: pr} = await github.rest.pulls.get({...context.repo, pull_number: meta.number});
+            if (pr.state !== 'open' || pr.draft || pr.base.ref !== 'main' || pr.head.sha !== meta.head) {
+              core.notice('Closed, draft or superseded PR; skipping.');
+              return;
+            }
+            core.setOutput('number', meta.number);
+            core.setOutput('head', meta.head);
+            core.setOutput('base', pr.base.sha);
 
-      - name: Create or update comment
-        uses: peter-evans/create-or-update-comment@v4
+      - name: Checkout current trusted rules
+        if: steps.pr.outputs.number
+        uses: actions/checkout@v4
         with:
-          issue-number: ${{ github.event.workflow_run.pull_requests[0].number }}
-          comment-id: ${{ steps.find.outputs.comment-id }}
-          body-path: comment_body.md
-          edit-mode: replace
+          ref: ${{ steps.pr.outputs.base }}
+          path: trusted
+          fetch-depth: 0
+          persist-credentials: false
 
-      - name: Add labels based on result
+      - uses: actions/setup-python@v5
+        if: steps.pr.outputs.number
+        with:
+          python-version: '3.11'
+      - if: steps.pr.outputs.number
+        run: python -m pip install 'PyYAML==6.0.3'
+
+      # Recheck with trusted code: uploaded data alone must never authorize a merge.
+      - name: Revalidate exact head using current trusted rules
+        if: steps.pr.outputs.number
+        id: verify
+        working-directory: trusted
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR: ${{ github.event.workflow_run.pull_requests[0].number }}
-          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          HEAD_SHA: ${{ steps.pr.outputs.head }}
+          BASE_SHA: ${{ steps.pr.outputs.base }}
         run: |
-          STATUS=$(cat ./artefacts/validation_result.txt 2>/dev/null | grep "^STATUS=" | cut -d= -f2 || echo UNKNOWN)
-          echo "Validation: $STATUS"
-
-          # Ensure labels exist (ignore errors if they do)
-          gh api "repos/$REPO/labels" --silent 2>&1 | head -c 200 || true
-
-          if [ "$STATUS" = "PASS" ]; then
-            gh pr edit "$PR" --repo "$REPO" --add-label "auto-validated,ready-for-review" --remove-label "needs-fix" 2>&1 || \
-            gh api "repos/$REPO/issues/$PR/labels" -X POST -f labels='["auto-validated","ready-for-review"]' 2>&1 | tail -5 || true
-          elif [ "$STATUS" = "FAIL" ]; then
-            gh pr edit "$PR" --repo "$REPO" --add-label "needs-fix" --remove-label "ready-for-review" 2>&1 || \
-            gh api "repos/$REPO/issues/$PR/labels" -X POST -f labels='["needs-fix"]' 2>&1 | tail -5 || true
-          fi
-
-      - name: Auto-merge if validation passed
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR: ${{ github.event.workflow_run.pull_requests[0].number }}
-          REPO: ${{ github.repository }}
-        run: |
-          STATUS=$(cat ./artefacts/validation_result.txt 2>/dev/null | grep "^STATUS=" | cut -d= -f2 || echo UNKNOWN)
-          if [ "$STATUS" != "PASS" ]; then
-            echo "Skipping auto-merge (validation status: $STATUS)."
-            exit 0
-          fi
-          if [ -z "$PR" ] || [ "$PR" = "null" ]; then
-            echo "No PR number in workflow_run event — skipping."
-            exit 0
-          fi
-          STATE=$(gh pr view "$PR" --repo "$REPO" --json state --jq '.state' 2>/dev/null || echo UNKNOWN)
-          if [ "$STATE" != "OPEN" ]; then
-            echo "PR #$PR is not open (state: $STATE) — skipping."
-            exit 0
-          fi
-          echo "Validation passed — auto-merging PR #$PR (squash, head branch kept)..."
-          # NOTE: no --delete-branch — students reuse their fork branch (often main)
-          # for future practicals; deleting it would break their next submission.
-          if gh pr merge "$PR" --repo "$REPO" --squash; then
-            echo "PR #$PR merged."
+          git fetch origin "refs/pull/$PR_NUMBER/head"
+          test "$(git rev-parse FETCH_HEAD)" = "$HEAD_SHA"
+          if bash scripts/validate.sh "$BASE_SHA" "$HEAD_SHA"; then
+            echo 'valid=true' >> "$GITHUB_OUTPUT"
           else
-            echo "::warning::Auto-merge failed for PR #$PR (likely a merge conflict) — needs manual merge."
-            gh pr comment "$PR" --repo "$REPO" --body "⚠️ Validation passed, but auto-merge failed (probably a merge conflict with \`main\`). A maintainer needs to resolve it manually." 2>&1 || true
-            exit 0
+            echo 'valid=false' >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Publish status, review and merge
+        if: steps.pr.outputs.number && steps.verify.outcome == 'success'
+        uses: actions/github-script@v7
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          HEAD_SHA: ${{ steps.pr.outputs.head }}
+          VALID: ${{ steps.verify.outputs.valid }}
+        with:
+          script: |
+            const fs = require('fs');
+            const number = Number(process.env.PR_NUMBER);
+            const sha = process.env.HEAD_SHA;
+            const passed = process.env.VALID === 'true' && context.payload.workflow_run.conclusion === 'success';
+            const args = {...context.repo, pull_number: number};
+            let {data: pr} = await github.rest.pulls.get(args);
+            if (pr.state !== 'open' || pr.draft || pr.head.sha !== sha) return;
+            await github.rest.repos.createCommitStatus({...context.repo, sha, context: 'validate',
+              state: passed ? 'success' : 'failure', description: passed ? 'Submission rules passed' : 'Submission validation failed',
+              target_url: context.payload.workflow_run.html_url});
+            const body = '## Automated Validation Results\n\n' + fs.readFileSync('trusted/validation_summary.md', 'utf8').slice(0,50000)
+              + '\n\nRun: ' + context.payload.workflow_run.html_url;
+            const comments = await github.paginate(github.rest.issues.listComments, {...context.repo, issue_number: number});
+            const existing = comments.find(c => c.user.login === 'github-actions[bot]' && c.body.startsWith('## Automated Validation Results'));
+            if (existing) await github.rest.issues.updateComment({...context.repo, comment_id: existing.id, body});
+            else await github.rest.issues.createComment({...context.repo, issue_number: number, body});
+            const labels = passed ? ['auto-validated', 'ready-for-review'] : ['needs-fix'];
+            for (const name of labels) {
+              try { await github.rest.issues.createLabel({...context.repo, name, color: passed ? '0e8a16' : 'd73a4a'}); }
+              catch (e) { if (e.status !== 422) throw e; }
+            }
+            await github.rest.issues.addLabels({...context.repo, issue_number: number, labels});
+            for (const name of passed ? ['needs-fix'] : ['auto-validated', 'ready-for-review']) {
+              try { await github.rest.issues.removeLabel({...context.repo, issue_number: number, name}); }
+              catch (e) { if (e.status !== 404) throw e; }
+            }
+            if (!passed) return;
+            // Poll GitHub's asynchronous mergeability calculation; never bypass protection.
+            for (let i = 0; i < 5; i++) {
+              ({data: pr} = await github.rest.pulls.get(args));
+              if (pr.head.sha !== sha || pr.state !== 'open' || pr.draft) return;
+              if (pr.mergeable !== null) break;
+              await new Promise(resolve => setTimeout(resolve, 2000));
+            }
+            if (pr.mergeable !== true) {
+              core.warning('PR has conflicts or mergeability is not ready; retry after resolving or rerunning validation.');
+              return;
+            }
+            // GitHub cannot approve a PR authored by the same bot identity.
+            if (pr.user.login !== 'github-actions[bot]') {
+              await github.rest.pulls.createReview({...args, commit_id: sha, event: 'APPROVE', body: 'Configured submission checks passed.'});
+            }
+            const {data: result} = await github.rest.pulls.merge({...args, sha, merge_method: 'merge'});
+            if (!result.merged) throw new Error(result.message);
